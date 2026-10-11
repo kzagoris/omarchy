@@ -25,7 +25,7 @@ pass "the migration reuses the install leaf"
 # --- helper against a fake sysfs ---
 
 make_sysfs() {
-  local root=$1 online=${2:-0}
+  local root=$1 online=${2:-0} t2=${3:-1}
   chmod -R u+w "$root" 2>/dev/null || true
   rm -rf "$root"
   mkdir -p "$root/class/powercap/intel-rapl:0" "$root/class/power_supply/ADP1" "$root/class/power_supply/BAT0" "$root/devices/system/cpu/intel_pstate"
@@ -41,6 +41,11 @@ make_sysfs() {
   printf 'Mains' >"$root/class/power_supply/ADP1/type"
   printf '%s' "$online" >"$root/class/power_supply/ADP1/online"
   printf 'Battery' >"$root/class/power_supply/BAT0/type"
+  if (( t2 )); then
+    mkdir -p "$root/bus/pci/devices/0000:02:00.1"
+    printf '0x106b' >"$root/bus/pci/devices/0000:02:00.1/vendor"
+    printf '0x1802' >"$root/bus/pci/devices/0000:02:00.1/device"
+  fi
 }
 
 run_helper() {
@@ -89,7 +94,7 @@ run_helper 1 >/dev/null
   fail "AC state clamps the firmware 100W PL1 to 45W"
 [[ $(cat "$rapl/constraint_1_power_limit_uw") == 60000000 ]] ||
   fail "AC state clamps the firmware 125W PL2 to 60W"
-pass "AC state restores the saved frequency policy and clamps PL1/PL2"
+pass "AC state on a T2 MacBook restores the saved frequency policy and clamps PL1/PL2"
 
 reset_sysfs
 make_sysfs "$sysfs" 1
@@ -102,6 +107,60 @@ run_helper 1 >/dev/null
 [[ $(cat "$rapl/constraint_1_power_limit_uw") == 60000000 ]] ||
   fail "AC state leaves an unset firmware PL2 unclamped"
 pass "AC state keeps firmware limits below the clamp"
+
+reset_sysfs
+make_sysfs "$sysfs" 0 0
+run_helper 0 >/dev/null
+run_helper 1 >/dev/null
+[[ $(cat "$rapl/constraint_0_power_limit_uw") == 100000000 ]] ||
+  fail "AC state clamps PL1 on a machine that is not a T2 MacBook"
+[[ $(cat "$rapl/constraint_1_power_limit_uw") == 125000000 ]] ||
+  fail "AC state clamps PL2 on a machine that is not a T2 MacBook"
+pass "AC state restores the saved firmware PL1/PL2 on other laptops"
+
+# USB-C laptops expose their charger as a USB supply, and AC means any
+# external supply is online (omarchy-power-present).
+reset_sysfs
+make_sysfs "$sysfs" 0
+rm -rf "$sysfs/class/power_supply/ADP1"
+mkdir -p "$sysfs/class/power_supply/ucsi-source-psy-USBC000:001"
+usbc="$sysfs/class/power_supply/ucsi-source-psy-USBC000:001"
+printf 'USB' >"$usbc/type"
+printf '0' >"$usbc/online"
+run_helper >/dev/null
+[[ $(cat "$sysfs/devices/system/cpu/intel_pstate/no_turbo") == 1 ]] ||
+  fail "an offline USB supply leaves the AC policy in force"
+printf '1' >"$usbc/online"
+run_helper >/dev/null
+[[ $(cat "$sysfs/devices/system/cpu/intel_pstate/no_turbo") == 0 ]] ||
+  fail "an online USB supply keeps the battery cap"
+mkdir -p "$sysfs/class/power_supply/ADP1"
+printf 'Mains' >"$sysfs/class/power_supply/ADP1/type"
+printf '0' >"$sysfs/class/power_supply/ADP1/online"
+run_helper >/dev/null
+[[ $(cat "$sysfs/devices/system/cpu/intel_pstate/no_turbo") == 0 ]] ||
+  fail "an offline Mains supply caps while a USB supply is still charging"
+grep -Fq 'ATTR{type}=="Mains|USB", ACTION=="change"' "$ROOT/default/udev/battery-cpu-limit.rules" ||
+  fail "udev rule does not switch caps on USB plug/unplug"
+pass "any online Mains or USB supply counts as AC"
+
+# Concurrent boot-time runs (powercap add and thermald ExecStartPre) must not
+# interleave the save-then-cap sequence.
+reset_sysfs
+make_sysfs "$sysfs" 0
+mkdir -p "$state_dir"
+exec 8>"$state_dir/lock"
+flock 8
+if timeout 1 env OMARCHY_SYSFS_ROOT="$sysfs" OMARCHY_BATTERY_CPU_STATE_DIR="$state_dir" bash "$helper" >/dev/null 2>&1; then
+  fail "helper runs while another run holds the lock"
+fi
+[[ $(cat "$sysfs/devices/system/cpu/intel_pstate/no_turbo") == 0 && ! -e $state_dir/no-turbo ]] ||
+  fail "helper touched state before taking the lock"
+exec 8>&-
+run_helper >/dev/null
+[[ $(cat "$sysfs/devices/system/cpu/intel_pstate/no_turbo") == 1 ]] ||
+  fail "helper does not cap once the lock is free"
+pass "helper runs are serialized by a lock"
 
 reset_sysfs
 make_sysfs "$sysfs" 0
@@ -182,8 +241,6 @@ run_helper >/dev/null 2>&1 || fail "powercap add re-run fails"
   fail "late RAPL registration saves the capped limits as AC defaults"
 grep -Fq 'SUBSYSTEM=="powercap", KERNEL=="intel-rapl:0", ACTION=="add"' "$ROOT/default/udev/battery-cpu-limit.rules" ||
   fail "udev rule does not re-apply once the RAPL zone registers"
-grep -Fq 'ATTR{type}=="Mains", ACTION=="change"' "$ROOT/default/udev/battery-cpu-limit.rules" ||
-  fail "udev rule does not switch caps on plug/unplug"
 pass "a RAPL zone registered after the Mains event still gets capped"
 
 reset_sysfs
@@ -208,6 +265,7 @@ mock_omarchy="$test_tmp/omarchy"
 rule_dest="$test_tmp/udev-rules/99-omarchy-battery-cpu-limit.rules"
 hook_dest="$test_tmp/system-sleep/battery-cpu-limit"
 dropin_dest="$test_tmp/systemd/thermald.service.d/battery-cpu-limit.conf"
+marker_dest="$test_tmp/state/activated"
 stub_bin="$test_tmp/bin"
 calls="$test_tmp/calls.log"
 mkdir -p "$mock_omarchy/default/udev" "$mock_omarchy/default/systemd/system-sleep" \
@@ -219,6 +277,7 @@ cp "$ROOT/default/systemd/system/thermald.service.d/battery-cpu-limit.conf" "$mo
 sed -e "s|/etc/udev/rules.d/99-omarchy-battery-cpu-limit.rules|$rule_dest|" \
   -e "s|/usr/lib/systemd/system-sleep/battery-cpu-limit|$hook_dest|" \
   -e "s|/etc/systemd/system/thermald.service.d/battery-cpu-limit.conf|$dropin_dest|" \
+  -e "s|/var/lib/omarchy/battery-cpu-limit/activated|$marker_dest|" \
   "$leaf" >"$mock_omarchy/install/hardware/intel/battery-cpu-limit.sh"
 
 cat >"$stub_bin/sudo" <<'SH'
@@ -228,10 +287,12 @@ SH
 cat >"$stub_bin/udevadm" <<SH
 #!/bin/bash
 printf 'udevadm %s\n' "\$*" >>"$calls"
+[[ \$1 != trigger ]] || (( \${UDEV_TRIGGER_FAILS:-0} == 0 ))
 SH
 cat >"$stub_bin/systemctl" <<SH
 #!/bin/bash
 printf 'systemctl %s\n' "\$*" >>"$calls"
+[[ \$1 != is-active ]] || (( \${THERMALD_ACTIVE:-1} == 1 ))
 SH
 cat >"$stub_bin/omarchy-hw-intel" <<SH
 #!/bin/bash
@@ -245,8 +306,12 @@ chmod +x "$stub_bin/"*
 
 run_migration() {
   : >"$calls"
-  rm -f "$rule_dest" "$hook_dest" "$dropin_dest"
-  HOME="$test_tmp/home" PATH="$stub_bin:$PATH" OMARCHY_PATH="$mock_omarchy" bash -euo pipefail "$migration" >/dev/null
+  rm -f "$rule_dest" "$hook_dest" "$dropin_dest" "$marker_dest"
+  rerun_migration
+}
+
+rerun_migration() {
+  HOME="$test_tmp/home" PATH="$stub_bin:$PATH" OMARCHY_PATH="$mock_omarchy" bash -euo pipefail "$migration" >/dev/null 2>&1
 }
 
 mkdir -p "$test_tmp/home"
@@ -269,14 +334,34 @@ grep -Fq '/usr/bin/omarchy-battery-cpu-limit' "$dropin_dest" ||
   fail "thermald drop-in calls the cpu-limit helper"
 grep -Fq 'systemctl daemon-reload' "$calls" ||
   fail "migration reloads systemd for the thermald drop-in"
-grep -Fq 'systemctl try-restart thermald.service' "$calls" ||
+grep -Fq 'systemctl restart thermald.service' "$calls" ||
   fail "migration re-baselines a running thermald on the cap"
 pass "migration makes thermald snapshot the capped PL1"
 
 : >"$calls"
-INTEL_HARDWARE=1 LAPTOP_BATTERY=1 HOME="$test_tmp/home" PATH="$stub_bin:$PATH" OMARCHY_PATH="$mock_omarchy" bash -euo pipefail "$migration" >/dev/null
+INTEL_HARDWARE=1 LAPTOP_BATTERY=1 rerun_migration
 [[ ! -s $calls ]] || fail "migration repeats privileged work once the machine is repaired"
 pass "migration no-ops once the machine is repaired"
+
+INTEL_HARDWARE=1 LAPTOP_BATTERY=1 THERMALD_ACTIVE=0 run_migration
+[[ -e $marker_dest ]] || fail "migration fails where thermald is not running"
+if grep -Fq 'systemctl restart' "$calls"; then
+  fail "migration starts a thermald that was not running"
+fi
+pass "migration leaves a stopped thermald alone"
+
+if INTEL_HARDWARE=1 LAPTOP_BATTERY=1 UDEV_TRIGGER_FAILS=1 run_migration; then
+  fail "migration succeeds when activation fails"
+fi
+[[ -f $rule_dest && ! -e $marker_dest ]] ||
+  fail "a failed activation is recorded as done"
+: >"$calls"
+INTEL_HARDWARE=1 LAPTOP_BATTERY=1 rerun_migration ||
+  fail "migration retry fails once activation works"
+grep -Fq 'trigger --subsystem-match=power_supply' "$calls" ||
+  fail "migration retry skips activation because the files already match"
+[[ -e $marker_dest ]] || fail "migration retry does not record activation"
+pass "a failed activation fails the migration and is retried"
 
 INTEL_HARDWARE=0 LAPTOP_BATTERY=1 run_migration
 [[ ! -e $rule_dest && ! -e $hook_dest && ! -e $dropin_dest && ! -s $calls ]] ||

@@ -1,16 +1,17 @@
 # A big parallel build can spike an Intel CPU past what the power source
 # sustains: the voltage droops until the BMS cuts all power (a hard shutdown
 # with nothing in the journal). power-saver only hints EPP, it never caps
-# frequency or package power, so cap the package hard while discharging and
-# clamp it on AC. The helper exits quietly on machines without Intel pstate or
-# without a battery.
+# frequency or package power, so cap the package while discharging and
+# restore the AC policy when the charger returns. The helper exits quietly on
+# machines without Intel pstate or without a battery.
 
-# Plug/unplug: switch between the battery and AC caps.
-SUBSYSTEM=="power_supply", ATTR{type}=="Mains", ACTION=="change", RUN+="/usr/bin/omarchy-battery-cpu-limit $attr{online}"
+# Plug/unplug on a barrel (Mains) or USB-C (USB) supply. No args: the helper
+# re-reads the whole machine's state, since one supply going offline does not
+# mean another is not still charging.
+SUBSYSTEM=="power_supply", ATTR{type}=="Mains|USB", ACTION=="change", RUN+="/usr/bin/omarchy-battery-cpu-limit"
 
 # Boot: the Mains add event (udev coldplug) fires before intel_rapl_common
 # registers the package zone (~2s earlier on a MacBookPro16,1), leaving the
 # PL1/PL2 writes without a target, so the firmware limits stayed in force for
-# the whole boot. Apply the cap once the zone exists instead (no args: the
-# helper re-reads the AC state).
+# the whole boot. Apply the cap once the zone exists instead.
 SUBSYSTEM=="powercap", KERNEL=="intel-rapl:0", ACTION=="add", RUN+="/usr/bin/omarchy-battery-cpu-limit"
