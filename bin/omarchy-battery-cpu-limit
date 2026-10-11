@@ -1,16 +1,16 @@
 #!/bin/bash
 
-# omarchy:summary=Cap Intel CPU package power on battery, restore on AC
+# omarchy:summary=Cap T2 MacBook CPU package power on battery and AC
 # omarchy:args=[0|1]
 # omarchy:examples=omarchy battery cpu limit 0
 # omarchy:hidden=true
 # omarchy:requires-sudo=true
 
-# A big parallel build can spike an Intel CPU past what the power source
-# sustains: the voltage droops until the BMS cuts all power (a hard shutdown
-# with nothing in the journal). power-saver only hints EPP, it never caps
-# frequency or package power, so this caps the CPU hard while discharging and
-# restores the saved policy when the charger returns.
+# On a T2 MacBook a big parallel build can spike the CPU past what the power
+# source sustains: the voltage droops until the BMS cuts all power (a hard
+# shutdown with nothing in the journal). power-saver only hints EPP, it never
+# caps frequency or package power, so this caps the CPU hard while
+# discharging and clamps the package limits on AC.
 #
 # Invoked as root with no args from the udev power-supply rule on plug/unplug,
 # the udev powercap rule once the RAPL zone registers at boot, the
@@ -18,8 +18,8 @@
 # itself: AC when any Mains or USB supply is online, as omarchy-power-present
 # decides. Runs are serialized by a lock, so concurrent boot-time runs cannot
 # save one run's capped values as the AC defaults. An explicit 0 (battery) or
-# 1 (AC) overrides the state. Exits quietly on machines without Intel pstate
-# or without a battery, so the udev rule can ship everywhere.
+# 1 (AC) overrides the state. Exits quietly on anything but a T2 MacBook with
+# Intel pstate.
 #
 # The RAPL package limits (PL1 long-term, PL2 short-term) are what actually
 # bound the draw: no-turbo and max-perf-pct only cap frequency, and an 8-core
@@ -29,11 +29,11 @@
 # locked by the BIOS, in which case a warning is logged and the frequency cap
 # still applies.
 #
-# On AC the saved firmware limits are restored, except on T2 MacBooks: a
-# MacBookPro16,1 (i9-9980HK, 45W TDP) boots with PL1=100W/PL2=125W, above its
-# 96W charger, and hard-cut on AC with those limits. There AC never restores
-# more than 45W/60W; firmware limits already below that are kept. Other
-# laptops whose firmware allows more on AC keep it.
+# On AC the firmware limits are too high as well: a MacBookPro16,1
+# (i9-9980HK, 45W TDP) boots with PL1=100W/PL2=125W, above its 96W charger,
+# and hard-cut on AC with those limits. So AC restores the saved frequency
+# policy but never more than 45W/60W; firmware limits already below that are
+# kept.
 
 set -euo pipefail
 
@@ -97,6 +97,7 @@ t2_mac() {
 }
 
 [[ -f $pstate_no_turbo && -f $pstate_max_pct ]] || exit 0
+t2_mac || exit 0
 
 battery_found=0
 for supply in "$sys_root"/class/power_supply/*; do
@@ -138,7 +139,7 @@ set_value() {
   echo "omarchy-battery-cpu-limit: $label=$actual"
 }
 
-# The saved firmware limit, clamped to the T2 AC ceiling. A missing or zero
+# The saved firmware limit, clamped to the AC ceiling. A missing or zero
 # (unset) firmware value gets the ceiling.
 ac_limit() {
   local name=$1 ceiling=$2 saved=0
@@ -179,23 +180,13 @@ if (( online == 0 )); then
   try_rapl "$rapl_pl1" "$bat_pl1" PL1
   try_rapl "$rapl_pl2" "$bat_pl2" PL2
 else
-  echo "omarchy-battery-cpu-limit: on AC, restoring saved policy"
+  echo "omarchy-battery-cpu-limit: on AC, restoring saved policy (package power clamped)"
   want_turbo=$ac_no_turbo_fallback
   want_pct=$ac_max_pct_fallback
   [[ -r $state_dir/no-turbo ]] && want_turbo=$(cat "$state_dir/no-turbo")
   [[ -r $state_dir/max-pct ]] && want_pct=$(cat "$state_dir/max-pct")
   set_value "$pstate_no_turbo" "$want_turbo" no-turbo
   set_value "$pstate_max_pct" "$want_pct" max-perf-pct
-  if t2_mac; then
-    echo "omarchy-battery-cpu-limit: T2 MacBook, clamping AC package power"
-    try_rapl "$rapl_pl1" "$(ac_limit pl1 "$ac_pl1_max")" PL1
-    try_rapl "$rapl_pl2" "$(ac_limit pl2 "$ac_pl2_max")" PL2
-  else
-    if [[ -r $state_dir/pl1 ]]; then
-      try_rapl "$rapl_pl1" "$(cat "$state_dir/pl1")" PL1
-    fi
-    if [[ -r $state_dir/pl2 ]]; then
-      try_rapl "$rapl_pl2" "$(cat "$state_dir/pl2")" PL2
-    fi
-  fi
+  try_rapl "$rapl_pl1" "$(ac_limit pl1 "$ac_pl1_max")" PL1
+  try_rapl "$rapl_pl2" "$(ac_limit pl2 "$ac_pl2_max")" PL2
 fi

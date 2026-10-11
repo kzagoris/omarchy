@@ -1,9 +1,9 @@
-# A big parallel build can spike an Intel CPU past what the power source
-# sustains: the voltage droops until the BMS cuts all power (a hard shutdown
-# with nothing in the journal). power-saver only hints EPP, it never caps
-# frequency or package power, so cap the package while discharging and
-# restore the AC policy when the charger returns. The helper exits quietly on
-# machines without Intel pstate or without a battery.
+# On a T2 MacBook a big parallel build can spike the CPU past what the power
+# source sustains: the voltage droops until the BMS cuts all power (a hard
+# shutdown with nothing in the journal). power-saver only hints EPP, it never
+# caps frequency or package power, so cap the package while discharging and
+# clamp it on AC. Installed on T2 MacBooks only, and the helper exits quietly
+# anywhere else.
 
 # Plug/unplug on a barrel (Mains) or USB-C (USB) supply. No args: the helper
 # re-reads the whole machine's state, since one supply going offline does not

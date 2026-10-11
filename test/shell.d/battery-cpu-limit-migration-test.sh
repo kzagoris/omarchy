@@ -5,7 +5,7 @@ set -euo pipefail
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 
 helper="$ROOT/bin/omarchy-battery-cpu-limit"
-leaf="$ROOT/install/hardware/intel/battery-cpu-limit.sh"
+leaf="$ROOT/install/hardware/apple/battery-cpu-limit.sh"
 migration="$ROOT/migrations/1791703208.sh"
 
 grep -Fq '# omarchy:summary=' "$helper" ||
@@ -14,11 +14,11 @@ grep -Fq 'omarchy:hidden=true' "$helper" ||
   fail "battery cpu-limit helper stays out of the default command listing"
 pass "battery cpu-limit helper declares valid command metadata"
 
-grep -Fq 'hardware/intel/battery-cpu-limit.sh' "$ROOT/install/hardware/all.sh" ||
+grep -Fq 'hardware/apple/battery-cpu-limit.sh' "$ROOT/install/hardware/all.sh" ||
   fail "fresh installs run the battery cpu-limit hardware leaf"
 pass "fresh installs wire the battery cpu-limit hardware leaf"
 
-grep -Fq 'install/hardware/intel/battery-cpu-limit.sh' "$migration" ||
+grep -Fq 'install/hardware/apple/battery-cpu-limit.sh' "$migration" ||
   fail "the migration shares the install leaf instead of duplicating it"
 pass "the migration reuses the install leaf"
 
@@ -111,12 +111,16 @@ pass "AC state keeps firmware limits below the clamp"
 reset_sysfs
 make_sysfs "$sysfs" 0 0
 run_helper 0 >/dev/null
-run_helper 1 >/dev/null
-[[ $(cat "$rapl/constraint_0_power_limit_uw") == 100000000 ]] ||
-  fail "AC state clamps PL1 on a machine that is not a T2 MacBook"
-[[ $(cat "$rapl/constraint_1_power_limit_uw") == 125000000 ]] ||
-  fail "AC state clamps PL2 on a machine that is not a T2 MacBook"
-pass "AC state restores the saved firmware PL1/PL2 on other laptops"
+[[ $(cat "$sysfs/devices/system/cpu/intel_pstate/no_turbo") == 0 && $(cat "$rapl/constraint_0_power_limit_uw") == 100000000 ]] ||
+  fail "helper caps a laptop that is not a T2 MacBook"
+[[ ! -e $state_dir/no-turbo ]] || fail "helper saves state on a laptop that is not a T2 MacBook"
+mkdir -p "$sysfs/bus/pci/devices/0000:00:00.0"
+printf '0x106b' >"$sysfs/bus/pci/devices/0000:00:00.0/vendor"
+printf '0x2003' >"$sysfs/bus/pci/devices/0000:00:00.0/device"
+run_helper 0 >/dev/null
+[[ $(cat "$sysfs/devices/system/cpu/intel_pstate/no_turbo") == 0 ]] ||
+  fail "helper treats any Apple PCI device as a T2 chip"
+pass "helper stays inert on anything but a T2 MacBook"
 
 # USB-C laptops expose their charger as a USB supply, and AC means any
 # external supply is online (omarchy-power-present).
@@ -270,7 +274,7 @@ stub_bin="$test_tmp/bin"
 calls="$test_tmp/calls.log"
 mkdir -p "$mock_omarchy/default/udev" "$mock_omarchy/default/systemd/system-sleep" \
   "$mock_omarchy/default/systemd/system/thermald.service.d" \
-  "$mock_omarchy/install/hardware/intel" "$stub_bin"
+  "$mock_omarchy/install/hardware/apple" "$stub_bin"
 cp "$ROOT/default/udev/battery-cpu-limit.rules" "$mock_omarchy/default/udev/"
 cp "$ROOT/default/systemd/system-sleep/battery-cpu-limit" "$mock_omarchy/default/systemd/system-sleep/"
 cp "$ROOT/default/systemd/system/thermald.service.d/battery-cpu-limit.conf" "$mock_omarchy/default/systemd/system/thermald.service.d/"
@@ -278,7 +282,7 @@ sed -e "s|/etc/udev/rules.d/99-omarchy-battery-cpu-limit.rules|$rule_dest|" \
   -e "s|/usr/lib/systemd/system-sleep/battery-cpu-limit|$hook_dest|" \
   -e "s|/etc/systemd/system/thermald.service.d/battery-cpu-limit.conf|$dropin_dest|" \
   -e "s|/var/lib/omarchy/battery-cpu-limit/activated|$marker_dest|" \
-  "$leaf" >"$mock_omarchy/install/hardware/intel/battery-cpu-limit.sh"
+  "$leaf" >"$mock_omarchy/install/hardware/apple/battery-cpu-limit.sh"
 
 cat >"$stub_bin/sudo" <<'SH'
 #!/bin/bash
@@ -294,9 +298,13 @@ cat >"$stub_bin/systemctl" <<SH
 printf 'systemctl %s\n' "\$*" >>"$calls"
 [[ \$1 != is-active ]] || (( \${THERMALD_ACTIVE:-1} == 1 ))
 SH
-cat >"$stub_bin/omarchy-hw-intel" <<SH
+cat >"$stub_bin/lspci" <<SH
 #!/bin/bash
-(( \${INTEL_HARDWARE:-0} == 1 ))
+if (( \${T2_MAC:-0} == 1 )); then
+  echo '02:00.1 Non-VGA unclassified device [0000]: Apple Inc. T2 Bridge Controller [106b:1801] (rev 01)'
+else
+  echo '00:02.0 VGA compatible controller [0300]: Intel Corporation UHD Graphics 630 [8086:3e9b]'
+fi
 SH
 cat >"$stub_bin/omarchy-battery-present" <<SH
 #!/bin/bash
@@ -315,9 +323,9 @@ rerun_migration() {
 }
 
 mkdir -p "$test_tmp/home"
-INTEL_HARDWARE=1 LAPTOP_BATTERY=1 run_migration
-[[ -f $rule_dest ]] || fail "migration publishes the udev rule on Intel laptops"
-[[ -f $hook_dest ]] || fail "migration publishes the sleep hook on Intel laptops"
+T2_MAC=1 LAPTOP_BATTERY=1 run_migration
+[[ -f $rule_dest ]] || fail "migration publishes the udev rule on T2 MacBooks"
+[[ -f $hook_dest ]] || fail "migration publishes the sleep hook on T2 MacBooks"
 [[ -x $hook_dest ]] || fail "migration publishes an executable sleep hook"
 grep -Fq 'omarchy-battery-cpu-limit' "$rule_dest" ||
   fail "published udev rule calls the cpu-limit helper"
@@ -325,7 +333,7 @@ grep -Fq 'control --reload-rules' "$calls" ||
   fail "migration reloads udev rules"
 grep -Fq 'trigger --subsystem-match=power_supply' "$calls" ||
   fail "migration applies the cap immediately through a power-supply trigger"
-pass "migration publishes the cap on Intel laptops with a battery"
+pass "migration publishes the cap on T2 MacBooks"
 
 [[ -f $dropin_dest ]] || fail "migration publishes the thermald drop-in"
 grep -Fq 'ExecStartPre=-' "$dropin_dest" ||
@@ -339,34 +347,34 @@ grep -Fq 'systemctl restart thermald.service' "$calls" ||
 pass "migration makes thermald snapshot the capped PL1"
 
 : >"$calls"
-INTEL_HARDWARE=1 LAPTOP_BATTERY=1 rerun_migration
+T2_MAC=1 LAPTOP_BATTERY=1 rerun_migration
 [[ ! -s $calls ]] || fail "migration repeats privileged work once the machine is repaired"
 pass "migration no-ops once the machine is repaired"
 
-INTEL_HARDWARE=1 LAPTOP_BATTERY=1 THERMALD_ACTIVE=0 run_migration
+T2_MAC=1 LAPTOP_BATTERY=1 THERMALD_ACTIVE=0 run_migration
 [[ -e $marker_dest ]] || fail "migration fails where thermald is not running"
 if grep -Fq 'systemctl restart' "$calls"; then
   fail "migration starts a thermald that was not running"
 fi
 pass "migration leaves a stopped thermald alone"
 
-if INTEL_HARDWARE=1 LAPTOP_BATTERY=1 UDEV_TRIGGER_FAILS=1 run_migration; then
+if T2_MAC=1 LAPTOP_BATTERY=1 UDEV_TRIGGER_FAILS=1 run_migration; then
   fail "migration succeeds when activation fails"
 fi
 [[ -f $rule_dest && ! -e $marker_dest ]] ||
   fail "a failed activation is recorded as done"
 : >"$calls"
-INTEL_HARDWARE=1 LAPTOP_BATTERY=1 rerun_migration ||
+T2_MAC=1 LAPTOP_BATTERY=1 rerun_migration ||
   fail "migration retry fails once activation works"
 grep -Fq 'trigger --subsystem-match=power_supply' "$calls" ||
   fail "migration retry skips activation because the files already match"
 [[ -e $marker_dest ]] || fail "migration retry does not record activation"
 pass "a failed activation fails the migration and is retried"
 
-INTEL_HARDWARE=0 LAPTOP_BATTERY=1 run_migration
+T2_MAC=0 LAPTOP_BATTERY=1 run_migration
 [[ ! -e $rule_dest && ! -e $hook_dest && ! -e $dropin_dest && ! -s $calls ]] ||
-  fail "migration touches non-Intel machines"
-INTEL_HARDWARE=1 LAPTOP_BATTERY=0 run_migration
+  fail "migration touches machines that are not T2 Macs"
+T2_MAC=1 LAPTOP_BATTERY=0 run_migration
 [[ ! -e $rule_dest && ! -e $hook_dest && ! -e $dropin_dest && ! -s $calls ]] ||
-  fail "migration touches machines without a battery"
+  fail "migration touches T2 desktops without a battery"
 pass "migration stays inert where the cap does not apply"

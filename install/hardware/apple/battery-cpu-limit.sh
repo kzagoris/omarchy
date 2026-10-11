@@ -1,9 +1,11 @@
-# Cap Intel CPU package power on battery: full-turbo spikes can droop the
-# power source until the BMS cuts all power (a hard shutdown with nothing in
-# the journal). power-saver only hints EPP, it never caps frequency or package
-# power.
+# Cap CPU package power on T2 MacBooks: full-turbo spikes can droop the power
+# source until the BMS cuts all power (a hard shutdown with nothing in the
+# journal). The firmware boots a MacBookPro16,1 at PL1=100W/PL2=125W, above
+# its 96W charger, and power-saver only hints EPP, it never caps frequency or
+# package power. The battery check skips T2 desktops (iMac Pro, Mac mini,
+# Mac Pro).
 
-if omarchy-hw-intel && omarchy-battery-present; then
+if lspci -nn | grep "106b:180[12]" >/dev/null && omarchy-battery-present; then
   rule_src="$OMARCHY_PATH/default/udev/battery-cpu-limit.rules"
   hook_src="$OMARCHY_PATH/default/systemd/system-sleep/battery-cpu-limit"
   rule_dest=/etc/udev/rules.d/99-omarchy-battery-cpu-limit.rules
