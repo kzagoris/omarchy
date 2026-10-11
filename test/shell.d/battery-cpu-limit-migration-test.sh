@@ -6,7 +6,7 @@ source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 
 helper="$ROOT/bin/omarchy-battery-cpu-limit"
 leaf="$ROOT/install/hardware/intel/battery-cpu-limit.sh"
-migration="$ROOT/migrations/1790406600.sh"
+migration="$ROOT/migrations/1791703208.sh"
 
 grep -Fq '# omarchy:summary=' "$helper" ||
   fail "battery cpu-limit helper documents its summary"
@@ -85,12 +85,27 @@ run_helper 1 >/dev/null
   fail "AC state restores no-turbo"
 [[ $(cat "$sysfs/devices/system/cpu/intel_pstate/max_perf_pct") == 100 ]] ||
   fail "AC state restores max-perf-pct"
-[[ $(cat "$rapl/constraint_0_power_limit_uw") == 100000000 ]] ||
-  fail "AC state restores PL1"
-[[ $(cat "$rapl/constraint_1_power_limit_uw") == 125000000 ]] ||
-  fail "AC state restores PL2"
-pass "AC state restores the saved policy"
+[[ $(cat "$rapl/constraint_0_power_limit_uw") == 45000000 ]] ||
+  fail "AC state clamps the firmware 100W PL1 to 45W"
+[[ $(cat "$rapl/constraint_1_power_limit_uw") == 60000000 ]] ||
+  fail "AC state clamps the firmware 125W PL2 to 60W"
+pass "AC state restores the saved frequency policy and clamps PL1/PL2"
 
+reset_sysfs
+make_sysfs "$sysfs" 1
+printf '28000000' >"$rapl/constraint_0_power_limit_uw"
+printf '0' >"$rapl/constraint_1_power_limit_uw"
+run_helper 0 >/dev/null
+run_helper 1 >/dev/null
+[[ $(cat "$rapl/constraint_0_power_limit_uw") == 28000000 ]] ||
+  fail "AC state changes a firmware PL1 that is already below the clamp"
+[[ $(cat "$rapl/constraint_1_power_limit_uw") == 60000000 ]] ||
+  fail "AC state leaves an unset firmware PL2 unclamped"
+pass "AC state keeps firmware limits below the clamp"
+
+reset_sysfs
+make_sysfs "$sysfs" 0
+run_helper 0 >/dev/null
 run_helper >/dev/null
 [[ $(cat "$sysfs/devices/system/cpu/intel_pstate/no_turbo") == 1 ]] ||
   fail "arg-less run re-reads the discharging state"
@@ -167,6 +182,8 @@ run_helper >/dev/null 2>&1 || fail "powercap add re-run fails"
   fail "late RAPL registration saves the capped limits as AC defaults"
 grep -Fq 'SUBSYSTEM=="powercap", KERNEL=="intel-rapl:0", ACTION=="add"' "$ROOT/default/udev/battery-cpu-limit.rules" ||
   fail "udev rule does not re-apply once the RAPL zone registers"
+grep -Fq 'ATTR{type}=="Mains", ACTION=="change"' "$ROOT/default/udev/battery-cpu-limit.rules" ||
+  fail "udev rule does not switch caps on plug/unplug"
 pass "a RAPL zone registered after the Mains event still gets capped"
 
 reset_sysfs

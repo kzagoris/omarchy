@@ -1,16 +1,16 @@
 #!/bin/bash
 
-# omarchy:summary=Cap Intel CPU package power on battery, restore on AC
+# omarchy:summary=Cap Intel CPU package power on battery and AC
 # omarchy:args=[0|1]
 # omarchy:examples=omarchy battery cpu limit 0
 # omarchy:hidden=true
 # omarchy:requires-sudo=true
 
-# A big parallel build on battery can spike an Intel CPU past what the battery
-# sustains alone: the voltage droops until the BMS cuts all power (a hard
-# shutdown with nothing in the journal). power-saver only hints EPP, it never
-# caps frequency or package power, so this caps the CPU while discharging and
-# restores the saved AC policy when the charger returns.
+# A big parallel build can spike an Intel CPU past what the power source
+# sustains: the voltage droops until the BMS cuts all power (a hard shutdown
+# with nothing in the journal). power-saver only hints EPP, it never caps
+# frequency or package power, so this caps the CPU hard while discharging and
+# clamps the package limits on AC too, restoring the saved frequency policy.
 #
 # Invoked as root from the udev power-supply rule (with the Mains online
 # state), from the udev powercap rule once the RAPL zone registers at boot, and
@@ -25,6 +25,11 @@
 # the read-only hardware ceiling. RAPL is best-effort: it can be absent, or
 # locked by the BIOS, in which case a warning is logged and the frequency cap
 # still applies.
+#
+# On AC the firmware limits can be too high as well: a MacBookPro16,1
+# (i9-9980HK, 45W TDP) boots with PL1=100W/PL2=125W, above its 96W charger,
+# and hard-cut on AC with those limits. So AC never restores more than
+# 45W/60W; firmware limits already below that are restored unchanged.
 
 set -euo pipefail
 
@@ -39,6 +44,8 @@ rapl_pl2="$sys_root/class/powercap/intel-rapl:0/constraint_1_power_limit_uw"
 bat_max_pct=50
 bat_pl1=25000000
 bat_pl2=35000000
+ac_pl1_max=45000000
+ac_pl2_max=60000000
 
 # Firmware values, only a fallback: the real saved AC policy wins whenever the
 # state files exist.
@@ -98,6 +105,18 @@ set_value() {
   echo "omarchy-battery-cpu-limit: $label=$actual"
 }
 
+# The saved firmware limit, clamped to the AC ceiling. A missing or zero
+# (unset) firmware value gets the ceiling.
+ac_limit() {
+  local name=$1 ceiling=$2 saved=0
+  [[ -r $state_dir/$name ]] && saved=$(cat "$state_dir/$name")
+  if [[ $saved =~ ^[0-9]+$ ]] && (( saved > 0 && saved < ceiling )); then
+    echo "$saved"
+  else
+    echo "$ceiling"
+  fi
+}
+
 # RAPL can be absent or BIOS-locked: try it, warn, move on.
 try_rapl() {
   local path=$1 value=$2 label=$3 actual
@@ -127,17 +146,13 @@ if (( online == 0 )); then
   try_rapl "$rapl_pl1" "$bat_pl1" PL1
   try_rapl "$rapl_pl2" "$bat_pl2" PL2
 else
-  echo "omarchy-battery-cpu-limit: on AC, restoring saved policy"
+  echo "omarchy-battery-cpu-limit: on AC, restoring saved policy (package power clamped)"
   want_turbo=$ac_no_turbo_fallback
   want_pct=$ac_max_pct_fallback
   [[ -r $state_dir/no-turbo ]] && want_turbo=$(cat "$state_dir/no-turbo")
   [[ -r $state_dir/max-pct ]] && want_pct=$(cat "$state_dir/max-pct")
   set_value "$pstate_no_turbo" "$want_turbo" no-turbo
   set_value "$pstate_max_pct" "$want_pct" max-perf-pct
-  if [[ -r $state_dir/pl1 ]]; then
-    try_rapl "$rapl_pl1" "$(cat "$state_dir/pl1")" PL1
-  fi
-  if [[ -r $state_dir/pl2 ]]; then
-    try_rapl "$rapl_pl2" "$(cat "$state_dir/pl2")" PL2
-  fi
+  try_rapl "$rapl_pl1" "$(ac_limit pl1 "$ac_pl1_max")" PL1
+  try_rapl "$rapl_pl2" "$(ac_limit pl2 "$ac_pl2_max")" PL2
 fi

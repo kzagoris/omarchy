@@ -1,4 +1,4 @@
-echo "Cap Intel CPU power on battery to avoid BMS power cuts"
+echo "Cap Intel CPU package power on battery and AC to avoid BMS power cuts"
 
 # Fresh installs run this leaf through install/hardware/all.sh; existing
 # installs reach it here so both populations share one implementation. The

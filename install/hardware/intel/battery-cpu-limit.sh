@@ -1,7 +1,7 @@
-# Cap Intel CPU package power while on battery: full-turbo spikes can droop a
-# discharging battery until the BMS cuts all power (a hard shutdown with
-# nothing in the journal). power-saver only hints EPP, it never caps frequency
-# or package power.
+# Cap Intel CPU package power on battery and clamp it on AC: full-turbo spikes
+# can droop the power source until the BMS cuts all power (a hard shutdown
+# with nothing in the journal). power-saver only hints EPP, it never caps
+# frequency or package power.
 
 if omarchy-hw-intel && omarchy-battery-present; then
   rule_src="$OMARCHY_PATH/default/udev/battery-cpu-limit.rules"
